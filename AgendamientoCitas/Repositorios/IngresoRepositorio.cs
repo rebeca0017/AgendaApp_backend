@@ -1,25 +1,29 @@
-﻿using System.Text;
+using System.Text;
 using AgendamientoCitas.Data;
 using AgendamientoCitas.Dtos;
 using AgendamientoCitas.Models;
+using AgendamientoCitas.Servicios;
 using Dapper;
 
 namespace AgendamientoCitas.Repositorios;
 
-public sealed class IngresoRepositorio(SqlConnectionFactory db) : IIngresoRepositorio
+public sealed class IngresoRepositorio(SqlConnectionFactory db, IServicioUsuarios servicioUsuarios) : IIngresoRepositorio
 {
     public async Task<IEnumerable<IngresoConsultarDTO>> ObtenerTodosAsync(DateTime? desde, DateTime? hasta)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
         var sql = new StringBuilder("""
             SELECT i.Id, i.CitaId, i.ClienteId,
                    CASE WHEN cl.Id IS NULL THEN NULL ELSE CONCAT(cl.Nombres, ' ', cl.Apellidos) END AS Cliente,
                    i.Concepto, i.Monto, i.MetodoPago, i.FechaPago, i.Referencia, i.Notas
             FROM Ingresos i
-            LEFT JOIN Clientes cl ON cl.Id = i.ClienteId
-            WHERE 1 = 1
+            LEFT JOIN Clientes cl ON cl.Id = i.ClienteId AND cl.UsuarioId = i.UsuarioId
+            WHERE i.UsuarioId = @UsuarioId
             """);
         var parameters = new DynamicParameters();
+        parameters.Add("UsuarioId", usuarioId);
+        sql.AppendLine();
 
         AgregarFiltrosFecha(sql, parameters, desde, hasta, "i.FechaPago");
         sql.AppendLine("ORDER BY i.FechaPago DESC;");
@@ -30,25 +34,28 @@ public sealed class IngresoRepositorio(SqlConnectionFactory db) : IIngresoReposi
 
     public async Task<IngresoConsultarDTO?> ObtenerPorIdAsync(int id)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
         const string sql = """
             SELECT i.Id, i.CitaId, i.ClienteId,
                    CASE WHEN cl.Id IS NULL THEN NULL ELSE CONCAT(cl.Nombres, ' ', cl.Apellidos) END AS Cliente,
                    i.Concepto, i.Monto, i.MetodoPago, i.FechaPago, i.Referencia, i.Notas
             FROM Ingresos i
-            LEFT JOIN Clientes cl ON cl.Id = i.ClienteId
-            WHERE i.Id = @Id;
+            LEFT JOIN Clientes cl ON cl.Id = i.ClienteId AND cl.UsuarioId = i.UsuarioId
+            WHERE i.Id = @Id AND i.UsuarioId = @UsuarioId;
             """;
 
-        var row = await connection.QuerySingleOrDefaultAsync<IngresoRow>(sql, new { Id = id });
+        var row = await connection.QuerySingleOrDefaultAsync<IngresoRow>(sql, new { Id = id, UsuarioId = usuarioId });
         return row is null ? null : ToResponse(row);
     }
 
     public async Task<IngresoResumenDTO> ObtenerResumenAsync(DateTime? desde, DateTime? hasta)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
-        var where = new StringBuilder("WHERE 1 = 1");
+        var where = new StringBuilder("WHERE UsuarioId = @UsuarioId");
         var parameters = new DynamicParameters();
+        parameters.Add("UsuarioId", usuarioId);
 
         AgregarFiltrosFecha(where, parameters, desde, hasta, "FechaPago");
 
@@ -80,18 +87,20 @@ public sealed class IngresoRepositorio(SqlConnectionFactory db) : IIngresoReposi
 
     public async Task<int> CrearAsync(Ingreso ingreso)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
         const string sql = """
-            INSERT INTO Ingresos (CitaId, ClienteId, Concepto, Monto, MetodoPago, FechaPago, Referencia, Notas)
+            INSERT INTO Ingresos (UsuarioId, CitaId, ClienteId, Concepto, Monto, MetodoPago, FechaPago, Referencia, Notas)
             OUTPUT INSERTED.Id
-            VALUES (@CitaId, @ClienteId, @Concepto, @Monto, @MetodoPago, @FechaPago, @Referencia, @Notas);
+            VALUES (@UsuarioId, @CitaId, @ClienteId, @Concepto, @Monto, @MetodoPago, @FechaPago, @Referencia, @Notas);
             """;
 
-        return await connection.QuerySingleAsync<int>(sql, ToParameters(ingreso));
+        return await connection.QuerySingleAsync<int>(sql, ToParameters(ingreso, usuarioId));
     }
 
     public async Task<bool> ActualizarAsync(Ingreso ingreso)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
         const string sql = """
             UPDATE Ingresos
@@ -103,22 +112,49 @@ public sealed class IngresoRepositorio(SqlConnectionFactory db) : IIngresoReposi
                 FechaPago = @FechaPago,
                 Referencia = @Referencia,
                 Notas = @Notas
-            WHERE Id = @Id;
+            WHERE Id = @Id AND UsuarioId = @UsuarioId;
             """;
 
-        var parameters = ToParameters(ingreso);
-        return await connection.ExecuteAsync(sql, parameters) > 0;
+        return await connection.ExecuteAsync(sql, ToParameters(ingreso, usuarioId)) > 0;
     }
 
     public async Task<bool> EliminarAsync(int id)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
-        const string sql = "DELETE FROM Ingresos WHERE Id = @Id;";
-        return await connection.ExecuteAsync(sql, new { Id = id }) > 0;
+        const string sql = "DELETE FROM Ingresos WHERE Id = @Id AND UsuarioId = @UsuarioId;";
+        return await connection.ExecuteAsync(sql, new { Id = id, UsuarioId = usuarioId }) > 0;
     }
 
-    private static object ToParameters(Ingreso ingreso) => new
+    public async Task<decimal> ObtenerTotalPorCitaAsync(int citaId, int? excluirIngresoId = null)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
+        using var connection = db.CreateConnection();
+        const string sql = """
+            SELECT COALESCE(SUM(Monto), 0)
+            FROM Ingresos
+            WHERE UsuarioId = @UsuarioId
+              AND CitaId = @CitaId
+              AND (@ExcluirIngresoId IS NULL OR Id <> @ExcluirIngresoId);
+            """;
+
+        return await connection.ExecuteScalarAsync<decimal>(sql, new
+        {
+            UsuarioId = usuarioId,
+            CitaId = citaId,
+            ExcluirIngresoId = excluirIngresoId
+        });
+    }
+
+    private async Task<string> ObtenerUsuarioIdAsync()
+    {
+        var usuario = await servicioUsuarios.ObtenerUsuario();
+        return usuario?.Id ?? throw new InvalidOperationException("No se pudo resolver el usuario autenticado.");
+    }
+
+    private static object ToParameters(Ingreso ingreso, string usuarioId) => new
+    {
+        UsuarioId = usuarioId,
         ingreso.Id,
         ingreso.CitaId,
         ingreso.ClienteId,

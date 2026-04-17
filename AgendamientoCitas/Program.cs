@@ -41,6 +41,7 @@ builder.Services.AddScoped<ICitaRepositorio, CitaRepositorio>();
 builder.Services.AddScoped<IIngresoRepositorio, IngresoRepositorio>();
 builder.Services.AddScoped<IGastoRepositorio, GastoRepositorio>();
 builder.Services.AddScoped<IRepositorioUsuarios, RepositorioUsuarios>();
+builder.Services.AddScoped<IRolRepositorio, RolRepositorio>();
 builder.Services.AddScoped<IServicioUsuarios, ServicioUsuarios>();
 builder.Services.Configure<EmailSettings>(builder.Configuration.GetSection("Email"));
 builder.Services.Configure<IdentificacionSettings>(builder.Configuration.GetSection("Identificacion"));
@@ -69,7 +70,10 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("Admin", policy => policy.RequireRole("Admin"));
+});
 
 builder.Services.AddOpenApi();
 
@@ -100,5 +104,7 @@ app.MapGroup("/api/citas").RequireAuthorization().MapCitas();
 app.MapGroup("/api/ingresos").RequireAuthorization().MapIngresos();
 app.MapGroup("/api/gastos").RequireAuthorization().MapGastos();
 app.MapGroup("/api/usuarios").MapUsuarios();
+app.MapGroup("/api/configuracion-app").MapConfiguracionApp();
+app.MapGroup("/api/reportes").RequireAuthorization().MapReportes();
 
 app.Run();

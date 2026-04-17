@@ -43,6 +43,8 @@ public class CitaConsultarDTO
 
     public string Servicio { get; set; } = null!;
 
+    public decimal ServicioPrecio { get; set; }
+
     public DateTime FechaInicio { get; set; }
 
     public DateTime FechaFin { get; set; }

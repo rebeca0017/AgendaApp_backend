@@ -5,6 +5,12 @@ namespace AgendamientoCitas.Dtos
         public string Email { get; set; } = null!;
     }
 
+    public class RemoverAdminDTO
+    {
+        public string Email { get; set; } = null!;
+        public string PasswordActual { get; set; } = null!;
+    }
+
     public class UsuarioAdminDTO
     {
         public string Id { get; set; } = null!;

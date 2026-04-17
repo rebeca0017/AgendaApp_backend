@@ -7,6 +7,7 @@ public static class DatabaseInitializer
     public static async Task InitializeAsync(IServiceProvider services)
     {
         var db = services.GetRequiredService<SqlConnectionFactory>();
+        var configuration = services.GetRequiredService<IConfiguration>();
         using var connection = db.CreateConnection();
 
         await connection.ExecuteAsync("""
@@ -97,6 +98,229 @@ public static class DatabaseInitializer
                 CREATE INDEX IX_Gastos_FechaGasto ON dbo.Gastos (FechaGasto);
                 CREATE INDEX IX_Gastos_Categoria ON dbo.Gastos (Categoria);
             END;
+
+            IF OBJECT_ID('dbo.ConfiguracionApp', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.ConfiguracionApp (
+                    Id int NOT NULL CONSTRAINT PK_ConfiguracionApp PRIMARY KEY,
+                    NombreApp nvarchar(120) NOT NULL,
+                    Logo nvarchar(max) NULL,
+                    FechaActualizacion datetime2 NOT NULL CONSTRAINT DF_ConfiguracionApp_FechaActualizacion DEFAULT SYSUTCDATETIME()
+                );
+            END;
+
+            IF NOT EXISTS (SELECT 1 FROM dbo.ConfiguracionApp WHERE Id = 1)
+            BEGIN
+                INSERT INTO dbo.ConfiguracionApp (Id, NombreApp, Logo)
+                VALUES (1, N'Mi Agenda', NULL);
+            END;
+
+            IF OBJECT_ID('dbo.Roles', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.Roles (
+                    Id nvarchar(450) NOT NULL CONSTRAINT PK_Roles PRIMARY KEY,
+                    Name nvarchar(256) NULL,
+                    NormalizedName nvarchar(256) NULL,
+                    ConcurrencyStamp nvarchar(max) NULL
+                );
+
+                CREATE UNIQUE INDEX RoleNameIndex ON dbo.Roles (NormalizedName)
+                WHERE NormalizedName IS NOT NULL;
+            END;
+
+            IF OBJECT_ID('dbo.RolesClaims', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.RolesClaims (
+                    Id int IDENTITY(1,1) NOT NULL CONSTRAINT PK_RolesClaims PRIMARY KEY,
+                    RoleId nvarchar(450) NOT NULL,
+                    ClaimType nvarchar(max) NULL,
+                    ClaimValue nvarchar(max) NULL,
+                    CONSTRAINT FK_RolesClaims_Roles_RoleId FOREIGN KEY (RoleId) REFERENCES dbo.Roles(Id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IX_RolesClaims_RoleId ON dbo.RolesClaims (RoleId);
+            END;
+
+            IF OBJECT_ID('dbo.UsuariosRoles', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.UsuariosRoles (
+                    UserId nvarchar(450) NOT NULL,
+                    RoleId nvarchar(450) NOT NULL,
+                    CONSTRAINT PK_UsuariosRoles PRIMARY KEY (UserId, RoleId),
+                    CONSTRAINT FK_UsuariosRoles_Roles_RoleId FOREIGN KEY (RoleId) REFERENCES dbo.Roles(Id) ON DELETE CASCADE,
+                    CONSTRAINT FK_UsuariosRoles_Usuarios_UserId FOREIGN KEY (UserId) REFERENCES dbo.Usuarios(Id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IX_UsuariosRoles_RoleId ON dbo.UsuariosRoles (RoleId);
+            END;
+
+            IF NOT EXISTS (SELECT 1 FROM dbo.Roles WHERE NormalizedName = N'ADMIN')
+            BEGIN
+                INSERT INTO dbo.Roles (Id, Name, NormalizedName, ConcurrencyStamp)
+                VALUES (CONVERT(nvarchar(450), NEWID()), N'Admin', N'ADMIN', CONVERT(nvarchar(450), NEWID()));
+            END;
+
+            IF NOT EXISTS (SELECT 1 FROM dbo.Roles WHERE NormalizedName = N'USUARIO')
+            BEGIN
+                INSERT INTO dbo.Roles (Id, Name, NormalizedName, ConcurrencyStamp)
+                VALUES (CONVERT(nvarchar(450), NEWID()), N'Usuario', N'USUARIO', CONVERT(nvarchar(450), NEWID()));
+            END;
+
+            IF COL_LENGTH('dbo.Clientes', 'UsuarioId') IS NULL
+            BEGIN
+                ALTER TABLE dbo.Clientes ADD UsuarioId nvarchar(450) NULL;
+            END;
+
+            IF COL_LENGTH('dbo.Servicios', 'UsuarioId') IS NULL
+            BEGIN
+                ALTER TABLE dbo.Servicios ADD UsuarioId nvarchar(450) NULL;
+            END;
+
+            IF COL_LENGTH('dbo.Citas', 'UsuarioId') IS NULL
+            BEGIN
+                ALTER TABLE dbo.Citas ADD UsuarioId nvarchar(450) NULL;
+            END;
+
+            IF COL_LENGTH('dbo.Ingresos', 'UsuarioId') IS NULL
+            BEGIN
+                ALTER TABLE dbo.Ingresos ADD UsuarioId nvarchar(450) NULL;
+            END;
+
+            IF COL_LENGTH('dbo.Gastos', 'UsuarioId') IS NULL
+            BEGIN
+                ALTER TABLE dbo.Gastos ADD UsuarioId nvarchar(450) NULL;
+            END;
             """);
+
+        await connection.ExecuteAsync("""
+            DECLARE @OwnerUserId nvarchar(450);
+
+            SELECT TOP 1 @OwnerUserId = u.Id
+            FROM dbo.Usuarios u
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM dbo.UsuariosRoles ur
+                INNER JOIN dbo.Roles r ON r.Id = ur.RoleId
+                WHERE ur.UserId = u.Id AND r.NormalizedName = N'ADMIN'
+            )
+            ORDER BY u.Email;
+
+            IF @OwnerUserId IS NULL
+            BEGIN
+                SELECT TOP 1 @OwnerUserId = Id
+                FROM dbo.Usuarios
+                ORDER BY Email;
+            END;
+
+            IF @OwnerUserId IS NOT NULL
+            BEGIN
+                UPDATE dbo.Clientes SET UsuarioId = @OwnerUserId WHERE UsuarioId IS NULL;
+                UPDATE dbo.Servicios SET UsuarioId = @OwnerUserId WHERE UsuarioId IS NULL;
+                UPDATE dbo.Citas SET UsuarioId = @OwnerUserId WHERE UsuarioId IS NULL;
+                UPDATE dbo.Ingresos SET UsuarioId = @OwnerUserId WHERE UsuarioId IS NULL;
+                UPDATE dbo.Gastos SET UsuarioId = @OwnerUserId WHERE UsuarioId IS NULL;
+            END;
+
+            IF EXISTS (
+                SELECT 1
+                FROM sys.indexes
+                WHERE name = N'IX_Clientes_Identificacion'
+                  AND object_id = OBJECT_ID(N'dbo.Clientes')
+            )
+            BEGIN
+                DROP INDEX IX_Clientes_Identificacion ON dbo.Clientes;
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM sys.indexes
+                WHERE name = N'IX_Clientes_UsuarioId_Identificacion'
+                  AND object_id = OBJECT_ID(N'dbo.Clientes')
+            )
+            BEGIN
+                CREATE UNIQUE INDEX IX_Clientes_UsuarioId_Identificacion
+                ON dbo.Clientes (UsuarioId, Identificacion)
+                WHERE UsuarioId IS NOT NULL AND Identificacion IS NOT NULL;
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM sys.indexes
+                WHERE name = N'IX_Clientes_UsuarioId'
+                  AND object_id = OBJECT_ID(N'dbo.Clientes')
+            )
+            BEGIN
+                CREATE INDEX IX_Clientes_UsuarioId ON dbo.Clientes (UsuarioId);
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM sys.indexes
+                WHERE name = N'IX_Servicios_UsuarioId'
+                  AND object_id = OBJECT_ID(N'dbo.Servicios')
+            )
+            BEGIN
+                CREATE INDEX IX_Servicios_UsuarioId ON dbo.Servicios (UsuarioId);
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM sys.indexes
+                WHERE name = N'IX_Citas_UsuarioId'
+                  AND object_id = OBJECT_ID(N'dbo.Citas')
+            )
+            BEGIN
+                CREATE INDEX IX_Citas_UsuarioId ON dbo.Citas (UsuarioId);
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM sys.indexes
+                WHERE name = N'IX_Ingresos_UsuarioId'
+                  AND object_id = OBJECT_ID(N'dbo.Ingresos')
+            )
+            BEGIN
+                CREATE INDEX IX_Ingresos_UsuarioId ON dbo.Ingresos (UsuarioId);
+            END;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM sys.indexes
+                WHERE name = N'IX_Gastos_UsuarioId'
+                  AND object_id = OBJECT_ID(N'dbo.Gastos')
+            )
+            BEGIN
+                CREATE INDEX IX_Gastos_UsuarioId ON dbo.Gastos (UsuarioId);
+            END;
+
+            INSERT INTO dbo.UsuariosRoles (UserId, RoleId)
+            SELECT u.Id, r.Id
+            FROM dbo.Usuarios u
+            CROSS JOIN dbo.Roles r
+            WHERE r.NormalizedName = N'USUARIO'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM dbo.UsuariosRoles ur
+                  WHERE ur.UserId = u.Id AND ur.RoleId = r.Id
+              );
+            """);
+
+        var adminEmails = configuration.GetSection("Security:AdminEmails").Get<string[]>() ?? [];
+        foreach (var email in adminEmails.Where(email => !string.IsNullOrWhiteSpace(email)))
+        {
+            await connection.ExecuteAsync("""
+                INSERT INTO dbo.UsuariosRoles (UserId, RoleId)
+                SELECT u.Id, r.Id
+                FROM dbo.Usuarios u
+                CROSS JOIN dbo.Roles r
+                WHERE u.NormalizedEmail = UPPER(@Email)
+                  AND r.NormalizedName = N'ADMIN'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM dbo.UsuariosRoles ur
+                      WHERE ur.UserId = u.Id AND ur.RoleId = r.Id
+                  );
+                """, new { Email = email.Trim() });
+        }
     }
 }

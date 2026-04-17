@@ -19,6 +19,8 @@ namespace AgendamientoCitas.Endpoints
         private const string ApellidoClaim = "apellido";
         private const string AdminClaim = "admin";
         private const string DebeCambiarPasswordClaim = "debeCambiarPassword";
+        private const string RolAdmin = "Admin";
+        private const string RolUsuario = "Usuario";
 
         public static RouteGroupBuilder MapUsuarios(this RouteGroupBuilder group)
         {
@@ -43,21 +45,22 @@ namespace AgendamientoCitas.Endpoints
             .RequireAuthorization();
 
             group.MapGet("/admin/usuarios", ListarUsuariosAdmin)
-            .RequireAuthorization();
+            .RequireAuthorization("Admin");
 
             group.MapPost("/admin/enviarrecuperacionpassword", EnviarRecuperacionPasswordAdmin)
-            .RequireAuthorization()
+            .RequireAuthorization("Admin")
             .AddEndpointFilter<FiltroValidaciones<AdminAccionUsuarioDTO>>();
 
             group.MapPost("/admin/generarpasswordtemporal", GenerarPasswordTemporalAdmin)
-            .RequireAuthorization()
+            .RequireAuthorization("Admin")
             .AddEndpointFilter<FiltroValidaciones<AdminAccionUsuarioDTO>>();
 
             return group;
         }
 
-        static async Task<Results<Ok<RespuestaAutenticacionDTO>, BadRequest<IEnumerable<IdentityError>>>>Registrar(CredencialesUsuarioDTO credencialesUsuarioDTO,
-            [FromServices] UserManager<IdentityUser> userManager, IConfiguration configuration)
+        static async Task<Results<NoContent, BadRequest<IEnumerable<IdentityError>>>>Registrar(CredencialesUsuarioDTO credencialesUsuarioDTO,
+            [FromServices] UserManager<IdentityUser> userManager,
+            IRolRepositorio rolRepositorio)
         {
             var email = credencialesUsuarioDTO.user.Trim();
             var nombre = credencialesUsuarioDTO.Nombre?.Trim() ?? string.Empty;
@@ -84,10 +87,9 @@ namespace AgendamientoCitas.Endpoints
                     new Claim(NombreClaim, nombre),
                     new Claim(ApellidoClaim, apellido)
                 ]);
+                await rolRepositorio.AsignarRolAsync(usuario.Id, RolUsuario);
 
-                var respuestaAutenticacion =
-                    await ConstruirToken(usuario.Email!, configuration, userManager);
-                return TypedResults.Ok(respuestaAutenticacion);
+                return TypedResults.NoContent();
             }
             else
             {
@@ -97,7 +99,9 @@ namespace AgendamientoCitas.Endpoints
 
         static async Task<Results<Ok<RespuestaAutenticacionDTO>, BadRequest<string>>> Login(CredencialesUsuarioDTO credencialesUsuarioDTO, 
             [FromServices] SignInManager<IdentityUser> signInManager,
-            [FromServices] UserManager<IdentityUser> userManager, IConfiguration configuration)
+            [FromServices] UserManager<IdentityUser> userManager,
+            IRolRepositorio rolRepositorio,
+            IConfiguration configuration)
         {
             var usuario = await BuscarUsuarioPorEmailAsync(userManager, credencialesUsuarioDTO.user.Trim());
 
@@ -111,7 +115,7 @@ namespace AgendamientoCitas.Endpoints
 
             if (resultado.Succeeded)
             {
-                var respuestaAutenticacion = await ConstruirToken(usuario.Email!, configuration, userManager);
+                var respuestaAutenticacion = await ConstruirToken(usuario.Email!, configuration, userManager, rolRepositorio);
                 return TypedResults.Ok(respuestaAutenticacion);
             }
             else
@@ -156,7 +160,8 @@ namespace AgendamientoCitas.Endpoints
         }
 
         public async static Task<Results<Ok<RespuestaAutenticacionDTO>, NotFound>>RenovarToken(IServicioUsuarios servicioUsuarios, IConfiguration configuration,
-            [FromServices] UserManager<IdentityUser> userManager)
+            [FromServices] UserManager<IdentityUser> userManager,
+            IRolRepositorio rolRepositorio)
         {
             var usuario = await servicioUsuarios.ObtenerUsuario();
 
@@ -166,13 +171,14 @@ namespace AgendamientoCitas.Endpoints
             }
 
             var respuestaAutenticacionDTO = await ConstruirToken(usuario.Email!, configuration,
-                userManager);
+                userManager, rolRepositorio);
 
             return TypedResults.Ok(respuestaAutenticacionDTO);
         }
 
 
-        private async static Task<RespuestaAutenticacionDTO>ConstruirToken(string email,IConfiguration configuration, UserManager<IdentityUser> userManager)
+        private async static Task<RespuestaAutenticacionDTO>ConstruirToken(string email,IConfiguration configuration, UserManager<IdentityUser> userManager,
+            IRolRepositorio rolRepositorio)
         {
             var claims = new List<Claim>
             {
@@ -186,11 +192,13 @@ namespace AgendamientoCitas.Endpoints
             }
 
             var claimsDB = await userManager.GetClaimsAsync(usuario);
+            var roles = await rolRepositorio.ObtenerRolesUsuarioAsync(usuario.Id);
 
             claims.AddRange(claimsDB);
+            claims.AddRange(roles.Select(rol => new Claim(ClaimTypes.Role, rol)));
             var nombre = ObtenerValorClaim(claimsDB, NombreClaim);
             var apellido = ObtenerValorClaim(claimsDB, ApellidoClaim);
-            var esAdmin = EsUsuarioAdmin(email, claimsDB, configuration);
+            var esAdmin = roles.Any(rol => string.Equals(rol, RolAdmin, StringComparison.OrdinalIgnoreCase));
             var debeCambiarPassword = EsClaimVerdadero(claimsDB, DebeCambiarPasswordClaim);
 
             if (esAdmin)
@@ -201,7 +209,7 @@ namespace AgendamientoCitas.Endpoints
             var llave = Llaves.ObtenerLlave(configuration);
             var creds = new SigningCredentials(llave.First(), SecurityAlgorithms.HmacSha256);
 
-            var expiracion = DateTime.UtcNow.AddYears(1);
+            var expiracion = DateTime.UtcNow.AddHours(8);
 
             var tokenDeSeguridad = new JwtSecurityToken(issuer: null, audience: null, claims: claims,
                 expires: expiracion, signingCredentials: creds);
@@ -221,7 +229,9 @@ namespace AgendamientoCitas.Endpoints
         }
 
         static async Task<IResult> ModificarUsuario(ModificarUsuarioDTO dto,IServicioUsuarios servicioUsuarios,
-            [FromServices] UserManager<IdentityUser> userManager,IConfiguration configuration)
+            [FromServices] UserManager<IdentityUser> userManager,
+            IRolRepositorio rolRepositorio,
+            IConfiguration configuration)
         {
             var usuario = await servicioUsuarios.ObtenerUsuario();
 
@@ -266,7 +276,7 @@ namespace AgendamientoCitas.Endpoints
 
             if (resultado.Succeeded)
             {
-                return Results.Ok(await ConstruirToken(nuevoEmail, configuration, userManager));
+                return Results.Ok(await ConstruirToken(nuevoEmail, configuration, userManager, rolRepositorio));
             }
 
             return Results.BadRequest(resultado.Errors);
@@ -299,9 +309,9 @@ namespace AgendamientoCitas.Endpoints
         static async Task<IResult> ListarUsuariosAdmin(IServicioUsuarios servicioUsuarios,
             IRepositorioUsuarios repositorioUsuarios,
             [FromServices] UserManager<IdentityUser> userManager,
-            IConfiguration configuration)
+            IRolRepositorio rolRepositorio)
         {
-            if (!await EsAdminActualAsync(servicioUsuarios, userManager, configuration))
+            if (!await EsAdminActualAsync(servicioUsuarios, rolRepositorio))
             {
                 return Results.Forbid();
             }
@@ -311,13 +321,12 @@ namespace AgendamientoCitas.Endpoints
 
             foreach (var usuario in usuarios.Where(usuario => !string.IsNullOrWhiteSpace(usuario.Email)))
             {
-                var claims = await userManager.GetClaimsAsync(usuario);
                 respuesta.Add(new UsuarioAdminDTO
                 {
                     Id = usuario.Id,
                     Email = usuario.Email!,
                     EmailConfirmed = usuario.EmailConfirmed,
-                    EsAdmin = EsUsuarioAdmin(usuario.Email!, claims, configuration)
+                    EsAdmin = await rolRepositorio.UsuarioTieneRolAsync(usuario.Id, RolAdmin)
                 });
             }
 
@@ -328,9 +337,9 @@ namespace AgendamientoCitas.Endpoints
             IServicioUsuarios servicioUsuarios,
             [FromServices] UserManager<IdentityUser> userManager,
             [FromServices] IServicioEmail servicioEmail,
-            IConfiguration configuration)
+            IRolRepositorio rolRepositorio)
         {
-            if (!await EsAdminActualAsync(servicioUsuarios, userManager, configuration))
+            if (!await EsAdminActualAsync(servicioUsuarios, rolRepositorio))
             {
                 return Results.Forbid();
             }
@@ -352,9 +361,9 @@ namespace AgendamientoCitas.Endpoints
             IServicioUsuarios servicioUsuarios,
             [FromServices] UserManager<IdentityUser> userManager,
             [FromServices] IServicioEmail servicioEmail,
-            IConfiguration configuration)
+            IRolRepositorio rolRepositorio)
         {
-            if (!await EsAdminActualAsync(servicioUsuarios, userManager, configuration))
+            if (!await EsAdminActualAsync(servicioUsuarios, rolRepositorio))
             {
                 return Results.Forbid();
             }
@@ -393,30 +402,17 @@ namespace AgendamientoCitas.Endpoints
         private static bool EsClaimVerdadero(IEnumerable<Claim> claims, string tipo)
             => string.Equals(ObtenerValorClaim(claims, tipo), "true", StringComparison.OrdinalIgnoreCase);
 
-        private static bool EsUsuarioAdmin(string email, IEnumerable<Claim> claims, IConfiguration configuration)
-        {
-            if (EsClaimVerdadero(claims, AdminClaim))
-            {
-                return true;
-            }
-
-            var adminEmails = configuration.GetSection("Security:AdminEmails").Get<string[]>() ?? [];
-            return adminEmails.Any(adminEmail => string.Equals(adminEmail, email, StringComparison.OrdinalIgnoreCase));
-        }
-
         private static async Task<bool> EsAdminActualAsync(IServicioUsuarios servicioUsuarios,
-            UserManager<IdentityUser> userManager,
-            IConfiguration configuration)
+            IRolRepositorio rolRepositorio)
         {
             var usuario = await servicioUsuarios.ObtenerUsuario();
 
-            if (usuario is null || string.IsNullOrWhiteSpace(usuario.Email))
+            if (usuario is null)
             {
                 return false;
             }
 
-            var claims = await userManager.GetClaimsAsync(usuario);
-            return EsUsuarioAdmin(usuario.Email, claims, configuration);
+            return await rolRepositorio.UsuarioTieneRolAsync(usuario.Id, RolAdmin);
         }
 
         private static string GenerarPasswordTemporal()

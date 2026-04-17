@@ -2,21 +2,25 @@ using System.Text;
 using AgendamientoCitas.Data;
 using AgendamientoCitas.Dtos;
 using AgendamientoCitas.Models;
+using AgendamientoCitas.Servicios;
 using Dapper;
 
 namespace AgendamientoCitas.Repositorios;
 
-public sealed class GastoRepositorio(SqlConnectionFactory db) : IGastoRepositorio
+public sealed class GastoRepositorio(SqlConnectionFactory db, IServicioUsuarios servicioUsuarios) : IGastoRepositorio
 {
     public async Task<IEnumerable<GastoConsultarDTO>> ObtenerTodosAsync(DateTime? desde, DateTime? hasta, string? categoria)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
         var sql = new StringBuilder("""
             SELECT Id, Concepto, Categoria, Monto, MetodoPago, FechaGasto, Referencia, Notas
             FROM Gastos
-            WHERE 1 = 1
+            WHERE UsuarioId = @UsuarioId
             """);
         var parameters = new DynamicParameters();
+        parameters.Add("UsuarioId", usuarioId);
+        sql.AppendLine();
 
         AgregarFiltrosFecha(sql, parameters, desde, hasta, "FechaGasto");
 
@@ -34,22 +38,25 @@ public sealed class GastoRepositorio(SqlConnectionFactory db) : IGastoRepositori
 
     public async Task<GastoConsultarDTO?> ObtenerPorIdAsync(int id)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
         const string sql = """
             SELECT Id, Concepto, Categoria, Monto, MetodoPago, FechaGasto, Referencia, Notas
             FROM Gastos
-            WHERE Id = @Id;
+            WHERE Id = @Id AND UsuarioId = @UsuarioId;
             """;
 
-        var row = await connection.QuerySingleOrDefaultAsync<GastoRow>(sql, new { Id = id });
+        var row = await connection.QuerySingleOrDefaultAsync<GastoRow>(sql, new { Id = id, UsuarioId = usuarioId });
         return row is null ? null : ToResponse(row);
     }
 
     public async Task<GastoResumenDTO> ObtenerResumenAsync(DateTime? desde, DateTime? hasta)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
-        var where = new StringBuilder("WHERE 1 = 1");
+        var where = new StringBuilder("WHERE UsuarioId = @UsuarioId");
         var parameters = new DynamicParameters();
+        parameters.Add("UsuarioId", usuarioId);
 
         AgregarFiltrosFecha(where, parameters, desde, hasta, "FechaGasto");
 
@@ -82,18 +89,20 @@ public sealed class GastoRepositorio(SqlConnectionFactory db) : IGastoRepositori
 
     public async Task<int> CrearAsync(Gasto gasto)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
         const string sql = """
-            INSERT INTO Gastos (Concepto, Categoria, Monto, MetodoPago, FechaGasto, Referencia, Notas)
+            INSERT INTO Gastos (UsuarioId, Concepto, Categoria, Monto, MetodoPago, FechaGasto, Referencia, Notas)
             OUTPUT INSERTED.Id
-            VALUES (@Concepto, @Categoria, @Monto, @MetodoPago, @FechaGasto, @Referencia, @Notas);
+            VALUES (@UsuarioId, @Concepto, @Categoria, @Monto, @MetodoPago, @FechaGasto, @Referencia, @Notas);
             """;
 
-        return await connection.QuerySingleAsync<int>(sql, ToParameters(gasto));
+        return await connection.QuerySingleAsync<int>(sql, ToParameters(gasto, usuarioId));
     }
 
     public async Task<bool> ActualizarAsync(Gasto gasto)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
         const string sql = """
             UPDATE Gastos
@@ -104,21 +113,29 @@ public sealed class GastoRepositorio(SqlConnectionFactory db) : IGastoRepositori
                 FechaGasto = @FechaGasto,
                 Referencia = @Referencia,
                 Notas = @Notas
-            WHERE Id = @Id;
+            WHERE Id = @Id AND UsuarioId = @UsuarioId;
             """;
 
-        return await connection.ExecuteAsync(sql, ToParameters(gasto)) > 0;
+        return await connection.ExecuteAsync(sql, ToParameters(gasto, usuarioId)) > 0;
     }
 
     public async Task<bool> EliminarAsync(int id)
     {
+        var usuarioId = await ObtenerUsuarioIdAsync();
         using var connection = db.CreateConnection();
-        const string sql = "DELETE FROM Gastos WHERE Id = @Id;";
-        return await connection.ExecuteAsync(sql, new { Id = id }) > 0;
+        const string sql = "DELETE FROM Gastos WHERE Id = @Id AND UsuarioId = @UsuarioId;";
+        return await connection.ExecuteAsync(sql, new { Id = id, UsuarioId = usuarioId }) > 0;
     }
 
-    private static object ToParameters(Gasto gasto) => new
+    private async Task<string> ObtenerUsuarioIdAsync()
     {
+        var usuario = await servicioUsuarios.ObtenerUsuario();
+        return usuario?.Id ?? throw new InvalidOperationException("No se pudo resolver el usuario autenticado.");
+    }
+
+    private static object ToParameters(Gasto gasto, string usuarioId) => new
+    {
+        UsuarioId = usuarioId,
         gasto.Id,
         Concepto = gasto.Concepto.Trim(),
         Categoria = gasto.Categoria.Trim(),

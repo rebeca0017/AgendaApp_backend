@@ -16,4 +16,6 @@ public interface IIngresoRepositorio
     Task<bool> ActualizarAsync(Ingreso ingreso);
 
     Task<bool> EliminarAsync(int id);
+
+    Task<decimal> ObtenerTotalPorCitaAsync(int citaId, int? excluirIngresoId = null);
 }

@@ -54,6 +54,7 @@ public static class IngresosEndpoints
         IIngresoRepositorio ingresos,
         ICitaRepositorio citas,
         IClienteRepositorio clientes,
+        IServicioRepositorio servicios,
         IMapper mapper,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
@@ -61,7 +62,7 @@ public static class IngresosEndpoints
         var logger = loggerFactory.CreateLogger(typeof(IngresosEndpoints).FullName!);
         logger.LogInformation("Creando un nuevo ingreso");
 
-        var error = await ValidarIngresoAsync(ingresoCrearDTO, citas, clientes);
+        var error = await ValidarIngresoAsync(ingresoCrearDTO, ingresos, citas, clientes, servicios);
         if (error is not null)
         {
             return TypedResults.BadRequest(error);
@@ -80,6 +81,7 @@ public static class IngresosEndpoints
         IIngresoRepositorio ingresos,
         ICitaRepositorio citas,
         IClienteRepositorio clientes,
+        IServicioRepositorio servicios,
         IMapper mapper,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
@@ -87,7 +89,7 @@ public static class IngresosEndpoints
         var logger = loggerFactory.CreateLogger(typeof(IngresosEndpoints).FullName!);
         logger.LogInformation("Actualizando ingreso. Id: {IngresoId}", id);
 
-        var error = await ValidarIngresoAsync(ingresoModificarDTO, citas, clientes);
+        var error = await ValidarIngresoAsync(ingresoModificarDTO, ingresos, citas, clientes, servicios, id);
         if (error is not null)
         {
             return TypedResults.BadRequest(error);
@@ -115,8 +117,11 @@ public static class IngresosEndpoints
 
     private static async Task<string?> ValidarIngresoAsync(
         IngresoCrearDTO request,
+        IIngresoRepositorio ingresos,
         ICitaRepositorio citas,
-        IClienteRepositorio clientes)
+        IClienteRepositorio clientes,
+        IServicioRepositorio servicios,
+        int? ingresoId = null)
     {
         if (string.IsNullOrWhiteSpace(request.Concepto))
         {
@@ -131,6 +136,46 @@ public static class IngresosEndpoints
         if (request.CitaId.HasValue && !await citas.ExisteAsync(request.CitaId.Value))
         {
             return "La cita indicada no existe.";
+        }
+
+        if (request.CitaId.HasValue)
+        {
+            var cita = await citas.ObtenerPorIdAsync(request.CitaId.Value);
+
+            if (cita is null)
+            {
+                return "La cita indicada no existe.";
+            }
+
+            if (cita.Estado is not EstadoCita.Confirmada and not EstadoCita.Completada)
+            {
+                return "Solo se pueden registrar ingresos para citas confirmadas o completadas.";
+            }
+
+            if (request.ClienteId.HasValue && request.ClienteId.Value != cita.ClienteId)
+            {
+                return "La cita indicada no pertenece al cliente seleccionado.";
+            }
+
+            var servicio = await servicios.ObtenerPorIdAsync(cita.ServicioId);
+
+            if (servicio is null)
+            {
+                return "El servicio de la cita indicada no existe.";
+            }
+
+            var totalAbonado = await ingresos.ObtenerTotalPorCitaAsync(cita.Id, ingresoId);
+            var saldoPendiente = servicio.Precio - totalAbonado;
+
+            if (saldoPendiente <= 0)
+            {
+                return "La cita indicada ya esta liquidada.";
+            }
+
+            if (request.Monto > saldoPendiente)
+            {
+                return $"El monto supera el saldo pendiente de la cita: {saldoPendiente:C}.";
+            }
         }
 
         if (request.ClienteId.HasValue && !await clientes.ExisteAsync(request.ClienteId.Value))
