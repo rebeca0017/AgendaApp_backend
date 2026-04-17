@@ -3,20 +3,14 @@ using FluentValidation;
 
 namespace AgendamientoCitas.Validaciones
 {
-    public class RecuperarPasswordDTOValidador : AbstractValidator<RecuperarPasswordDTO>
+    public class SolicitarRecuperacionPasswordDTOValidador : AbstractValidator<SolicitarRecuperacionPasswordDTO>
     {
-        public RecuperarPasswordDTOValidador()
+        public SolicitarRecuperacionPasswordDTOValidador()
         {
             RuleFor(x => x.Email)
                 .NotEmpty().WithMessage(Utilidades.CampoRequeridoMensaje)
                 .MaximumLength(256).WithMessage(Utilidades.MaximumLengthMensaje)
                 .EmailAddress().WithMessage(Utilidades.EmailMensaje);
-
-            RuleFor(x => x.Token)
-                .NotEmpty().WithMessage(Utilidades.CampoRequeridoMensaje);
-
-            RuleFor(x => x.PasswordNueva)
-                .NotEmpty().WithMessage(Utilidades.CampoRequeridoMensaje);
         }
     }
 }

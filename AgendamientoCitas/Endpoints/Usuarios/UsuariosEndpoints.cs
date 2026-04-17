@@ -4,8 +4,10 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using AgendamientoCitas.Dtos;
 using AgendamientoCitas.Filtros;
+using AgendamientoCitas.Repositorios;
 using AgendamientoCitas.Servicios;
 using AgendamientoCitas.Utilidades;
+using System.Security.Cryptography;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 
@@ -15,6 +17,8 @@ namespace AgendamientoCitas.Endpoints
     {
         private const string NombreClaim = "nombre";
         private const string ApellidoClaim = "apellido";
+        private const string AdminClaim = "admin";
+        private const string DebeCambiarPasswordClaim = "debeCambiarPassword";
 
         public static RouteGroupBuilder MapUsuarios(this RouteGroupBuilder group)
         {
@@ -23,6 +27,9 @@ namespace AgendamientoCitas.Endpoints
 
             group.MapPost("/login", Login)
                .AddEndpointFilter<FiltroValidaciones<CredencialesUsuarioDTO>>();
+
+            group.MapPost("/solicitarrecuperacionpassword", SolicitarRecuperacionPassword)
+               .AddEndpointFilter<FiltroValidaciones<SolicitarRecuperacionPasswordDTO>>();
 
             group.MapPost("/recuperarpassword", RecuperarPassword)
                .AddEndpointFilter<FiltroValidaciones<RecuperarPasswordDTO>>();
@@ -34,6 +41,17 @@ namespace AgendamientoCitas.Endpoints
 
             group.MapPost("/cambiarpassword", CambiarPassword)
             .RequireAuthorization();
+
+            group.MapGet("/admin/usuarios", ListarUsuariosAdmin)
+            .RequireAuthorization();
+
+            group.MapPost("/admin/enviarrecuperacionpassword", EnviarRecuperacionPasswordAdmin)
+            .RequireAuthorization()
+            .AddEndpointFilter<FiltroValidaciones<AdminAccionUsuarioDTO>>();
+
+            group.MapPost("/admin/generarpasswordtemporal", GenerarPasswordTemporalAdmin)
+            .RequireAuthorization()
+            .AddEndpointFilter<FiltroValidaciones<AdminAccionUsuarioDTO>>();
 
             return group;
         }
@@ -102,6 +120,21 @@ namespace AgendamientoCitas.Endpoints
             }
         }
 
+        static async Task<IResult> SolicitarRecuperacionPassword(SolicitarRecuperacionPasswordDTO dto,
+            [FromServices] UserManager<IdentityUser> userManager,
+            [FromServices] IServicioEmail servicioEmail)
+        {
+            var usuario = await BuscarUsuarioPorEmailAsync(userManager, dto.Email.Trim());
+
+            if (usuario is not null && !string.IsNullOrWhiteSpace(usuario.Email))
+            {
+                var token = await userManager.GeneratePasswordResetTokenAsync(usuario);
+                await servicioEmail.EnviarRecuperacionPasswordAsync(usuario.Email, token);
+            }
+
+            return Results.NoContent();
+        }
+
         static async Task<IResult> RecuperarPassword(RecuperarPasswordDTO dto,
             [FromServices] UserManager<IdentityUser> userManager)
         {
@@ -109,11 +142,10 @@ namespace AgendamientoCitas.Endpoints
 
             if (usuario is null)
             {
-                return Results.NotFound(new { mensaje = "Usuario no encontrado" });
+                return Results.BadRequest("La solicitud de recuperacion no es valida.");
             }
 
-            var token = await userManager.GeneratePasswordResetTokenAsync(usuario);
-            var resultado = await userManager.ResetPasswordAsync(usuario, token, dto.PasswordNueva.Trim());
+            var resultado = await userManager.ResetPasswordAsync(usuario, dto.Token, dto.PasswordNueva.Trim());
 
             if (resultado.Succeeded)
             {
@@ -158,6 +190,13 @@ namespace AgendamientoCitas.Endpoints
             claims.AddRange(claimsDB);
             var nombre = ObtenerValorClaim(claimsDB, NombreClaim);
             var apellido = ObtenerValorClaim(claimsDB, ApellidoClaim);
+            var esAdmin = EsUsuarioAdmin(email, claimsDB, configuration);
+            var debeCambiarPassword = EsClaimVerdadero(claimsDB, DebeCambiarPasswordClaim);
+
+            if (esAdmin)
+            {
+                claims.Add(new Claim(AdminClaim, "true"));
+            }
 
             var llave = Llaves.ObtenerLlave(configuration);
             var creds = new SigningCredentials(llave.First(), SecurityAlgorithms.HmacSha256);
@@ -175,7 +214,9 @@ namespace AgendamientoCitas.Endpoints
                 Expiracion = expiracion,
                 Email = email,
                 Nombre = nombre,
-                Apellido = apellido
+                Apellido = apellido,
+                EsAdmin = esAdmin,
+                DebeCambiarPassword = debeCambiarPassword
             };
         }
 
@@ -248,10 +289,96 @@ namespace AgendamientoCitas.Endpoints
 
             if (resultado.Succeeded)
             {
+                await ActualizarClaimAsync(userManager, usuario, DebeCambiarPasswordClaim, "false");
                 return Results.NoContent();
             }
 
             return Results.BadRequest(resultado.Errors);
+        }
+
+        static async Task<IResult> ListarUsuariosAdmin(IServicioUsuarios servicioUsuarios,
+            IRepositorioUsuarios repositorioUsuarios,
+            [FromServices] UserManager<IdentityUser> userManager,
+            IConfiguration configuration)
+        {
+            if (!await EsAdminActualAsync(servicioUsuarios, userManager, configuration))
+            {
+                return Results.Forbid();
+            }
+
+            var usuarios = await repositorioUsuarios.ListarUsuarios();
+            var respuesta = new List<UsuarioAdminDTO>();
+
+            foreach (var usuario in usuarios.Where(usuario => !string.IsNullOrWhiteSpace(usuario.Email)))
+            {
+                var claims = await userManager.GetClaimsAsync(usuario);
+                respuesta.Add(new UsuarioAdminDTO
+                {
+                    Id = usuario.Id,
+                    Email = usuario.Email!,
+                    EmailConfirmed = usuario.EmailConfirmed,
+                    EsAdmin = EsUsuarioAdmin(usuario.Email!, claims, configuration)
+                });
+            }
+
+            return Results.Ok(respuesta);
+        }
+
+        static async Task<IResult> EnviarRecuperacionPasswordAdmin(AdminAccionUsuarioDTO dto,
+            IServicioUsuarios servicioUsuarios,
+            [FromServices] UserManager<IdentityUser> userManager,
+            [FromServices] IServicioEmail servicioEmail,
+            IConfiguration configuration)
+        {
+            if (!await EsAdminActualAsync(servicioUsuarios, userManager, configuration))
+            {
+                return Results.Forbid();
+            }
+
+            var usuario = await BuscarUsuarioPorEmailAsync(userManager, dto.Email.Trim());
+
+            if (usuario is null || string.IsNullOrWhiteSpace(usuario.Email))
+            {
+                return Results.NotFound("Usuario no encontrado.");
+            }
+
+            var token = await userManager.GeneratePasswordResetTokenAsync(usuario);
+            await servicioEmail.EnviarRecuperacionPasswordAsync(usuario.Email, token);
+
+            return Results.NoContent();
+        }
+
+        static async Task<IResult> GenerarPasswordTemporalAdmin(AdminAccionUsuarioDTO dto,
+            IServicioUsuarios servicioUsuarios,
+            [FromServices] UserManager<IdentityUser> userManager,
+            [FromServices] IServicioEmail servicioEmail,
+            IConfiguration configuration)
+        {
+            if (!await EsAdminActualAsync(servicioUsuarios, userManager, configuration))
+            {
+                return Results.Forbid();
+            }
+
+            var usuario = await BuscarUsuarioPorEmailAsync(userManager, dto.Email.Trim());
+
+            if (usuario is null || string.IsNullOrWhiteSpace(usuario.Email))
+            {
+                return Results.NotFound("Usuario no encontrado.");
+            }
+
+            var passwordTemporal = GenerarPasswordTemporal();
+            var token = await userManager.GeneratePasswordResetTokenAsync(usuario);
+            var resultado = await userManager.ResetPasswordAsync(usuario, token, passwordTemporal);
+
+            if (!resultado.Succeeded)
+            {
+                return Results.BadRequest(resultado.Errors);
+            }
+
+            await ActualizarClaimAsync(userManager, usuario, DebeCambiarPasswordClaim, "true");
+            await servicioEmail.EnviarPasswordTemporalAsync(usuario.Email, passwordTemporal);
+
+            return Results.NoContent();
         }
 
         private static Task<IdentityUser?> BuscarUsuarioPorEmailAsync(UserManager<IdentityUser> userManager,string email)
@@ -262,6 +389,62 @@ namespace AgendamientoCitas.Endpoints
 
         private static string ObtenerValorClaim(IEnumerable<Claim> claims, string tipo)
             => claims.FirstOrDefault(claim => claim.Type == tipo)?.Value ?? string.Empty;
+
+        private static bool EsClaimVerdadero(IEnumerable<Claim> claims, string tipo)
+            => string.Equals(ObtenerValorClaim(claims, tipo), "true", StringComparison.OrdinalIgnoreCase);
+
+        private static bool EsUsuarioAdmin(string email, IEnumerable<Claim> claims, IConfiguration configuration)
+        {
+            if (EsClaimVerdadero(claims, AdminClaim))
+            {
+                return true;
+            }
+
+            var adminEmails = configuration.GetSection("Security:AdminEmails").Get<string[]>() ?? [];
+            return adminEmails.Any(adminEmail => string.Equals(adminEmail, email, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static async Task<bool> EsAdminActualAsync(IServicioUsuarios servicioUsuarios,
+            UserManager<IdentityUser> userManager,
+            IConfiguration configuration)
+        {
+            var usuario = await servicioUsuarios.ObtenerUsuario();
+
+            if (usuario is null || string.IsNullOrWhiteSpace(usuario.Email))
+            {
+                return false;
+            }
+
+            var claims = await userManager.GetClaimsAsync(usuario);
+            return EsUsuarioAdmin(usuario.Email, claims, configuration);
+        }
+
+        private static string GenerarPasswordTemporal()
+        {
+            const string mayusculas = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+            const string minusculas = "abcdefghijkmnopqrstuvwxyz";
+            const string numeros = "23456789";
+            const string simbolos = "!@$?";
+            const string todos = mayusculas + minusculas + numeros + simbolos;
+
+            var caracteres = new List<char>
+            {
+                ObtenerCaracterAleatorio(mayusculas),
+                ObtenerCaracterAleatorio(minusculas),
+                ObtenerCaracterAleatorio(numeros),
+                ObtenerCaracterAleatorio(simbolos)
+            };
+
+            while (caracteres.Count < 12)
+            {
+                caracteres.Add(ObtenerCaracterAleatorio(todos));
+            }
+
+            return new string(caracteres.OrderBy(_ => RandomNumberGenerator.GetInt32(int.MaxValue)).ToArray());
+        }
+
+        private static char ObtenerCaracterAleatorio(string valores)
+            => valores[RandomNumberGenerator.GetInt32(valores.Length)];
 
         private static async Task ActualizarClaimAsync(UserManager<IdentityUser> userManager,IdentityUser usuario,string tipo,string valor)
         {

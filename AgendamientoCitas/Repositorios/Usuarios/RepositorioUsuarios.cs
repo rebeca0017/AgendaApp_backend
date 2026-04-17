@@ -139,6 +139,15 @@ namespace AgendamientoCitas.Repositorios
             return rows == 1;
         }
 
+        public async Task<List<IdentityUser>> ListarUsuarios()
+        {
+            const string sql = "SELECT * FROM Usuarios ORDER BY Email";
+
+            using var conexion = new SqlConnection(connectionString);
+            var usuarios = await conexion.QueryAsync<IdentityUser>(sql);
+            return usuarios.ToList();
+        }
+
         private sealed class ClaimRow
         {
             public string? Type { get; set; }

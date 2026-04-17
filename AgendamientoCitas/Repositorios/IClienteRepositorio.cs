@@ -20,4 +20,6 @@ public interface IClienteRepositorio
     Task<bool> ExisteActivoAsync(int id);
 
     Task<bool> ExisteAsync(int id);
+
+    Task<bool> ExisteIdentificacionAsync(string identificacion, int? excluirId = null);
 }

@@ -1,6 +1,7 @@
 ﻿using AgendamientoCitas.Dtos;
 using AgendamientoCitas.Models;
 using AgendamientoCitas.Repositorios;
+using AgendamientoCitas.Servicios;
 using AutoMapper;
 using Microsoft.AspNetCore.Http.HttpResults;
 
@@ -40,6 +41,7 @@ public static class ClientesEndpoints
     public static async Task<Results<Created<ClienteConsultarDTO>, BadRequest<string>>> CrearCliente(
         ClienteCrearDTO clienteCrearDTO,
         IClienteRepositorio repository,
+        IValidadorIdentificacion validadorIdentificacion,
         IMapper mapper,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
@@ -47,7 +49,7 @@ public static class ClientesEndpoints
         var logger = loggerFactory.CreateLogger(typeof(ClientesEndpoints).FullName!);
         logger.LogInformation("Creando un nuevo cliente");
 
-        var error = ValidarCliente(clienteCrearDTO);
+        var error = await ValidarCliente(clienteCrearDTO, repository, validadorIdentificacion, null, ct);
         if (error is not null)
         {
             return TypedResults.BadRequest(error);
@@ -64,6 +66,7 @@ public static class ClientesEndpoints
         int id,
         ClienteModificarDTO clienteModificarDTO,
         IClienteRepositorio repository,
+        IValidadorIdentificacion validadorIdentificacion,
         IMapper mapper,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
@@ -71,7 +74,7 @@ public static class ClientesEndpoints
         var logger = loggerFactory.CreateLogger(typeof(ClientesEndpoints).FullName!);
         logger.LogInformation("Actualizando cliente. Id: {ClienteId}", id);
 
-        var error = ValidarCliente(clienteModificarDTO);
+        var error = await ValidarCliente(clienteModificarDTO, repository, validadorIdentificacion, id, ct);
         if (error is not null)
         {
             return TypedResults.BadRequest(error);
@@ -111,11 +114,29 @@ public static class ClientesEndpoints
         return updated ? TypedResults.NoContent() : TypedResults.NotFound();
     }
 
-    private static string? ValidarCliente(ClienteCrearDTO request)
+    private static async Task<string?> ValidarCliente(
+        ClienteCrearDTO request,
+        IClienteRepositorio repository,
+        IValidadorIdentificacion validadorIdentificacion,
+        int? clienteId,
+        CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Nombres) || string.IsNullOrWhiteSpace(request.Apellidos))
         {
             return "Los nombres y apellidos son obligatorios.";
+        }
+
+        var errorIdentificacion = await validadorIdentificacion.ValidarCedulaAsync(request.Identificacion, ct);
+
+        if (errorIdentificacion is not null)
+        {
+            return errorIdentificacion;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Identificacion)
+            && await repository.ExisteIdentificacionAsync(request.Identificacion.Trim(), clienteId))
+        {
+            return "Esa identificacion ya existe.";
         }
 
         return null;

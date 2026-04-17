@@ -11,6 +11,7 @@ namespace AgendamientoCitas.Repositorios
         Task<IdentityUser?> BuscarUsuarioPorEmail(string normalizedEmail);
         Task<string> Crear(IdentityUser usuario);
         Task<bool> Eliminar(IdentityUser usuario);
+        Task<List<IdentityUser>> ListarUsuarios();
         Task<IList<IdentityUser>> ObtenerUsuariosPorClaim(Claim claim);
         Task<List<Claim>> ObtenerClaims(IdentityUser user);
         Task RemoverClaims(IdentityUser user, IEnumerable<Claim> claims);

@@ -104,4 +104,21 @@ public sealed class ClienteRepositorio(SqlConnectionFactory db) : IClienteReposi
         const string sql = "SELECT COUNT(1) FROM Clientes WHERE Id = @Id;";
         return await connection.ExecuteScalarAsync<int>(sql, new { Id = id }) > 0;
     }
+
+    public async Task<bool> ExisteIdentificacionAsync(string identificacion, int? excluirId = null)
+    {
+        using var connection = db.CreateConnection();
+        const string sql = """
+            SELECT COUNT(1)
+            FROM Clientes
+            WHERE Identificacion = @Identificacion
+              AND (@ExcluirId IS NULL OR Id <> @ExcluirId);
+            """;
+
+        return await connection.ExecuteScalarAsync<int>(sql, new
+        {
+            Identificacion = identificacion.Trim(),
+            ExcluirId = excluirId
+        }) > 0;
+    }
 }

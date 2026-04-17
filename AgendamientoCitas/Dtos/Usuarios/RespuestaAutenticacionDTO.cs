@@ -7,5 +7,7 @@
         public string Email { get; set; } = null!;
         public string Nombre { get; set; } = string.Empty;
         public string Apellido { get; set; } = string.Empty;
+        public bool EsAdmin { get; set; }
+        public bool DebeCambiarPassword { get; set; }
     }
 }
